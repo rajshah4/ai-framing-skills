@@ -1,0 +1,55 @@
+# Weekly snapshot of repo metrics into metrics/history.jsonl.
+#
+# GitHub's traffic API only keeps 14 days of views/clones; this action makes
+# the time series permanent. Stars and forks work with the default token.
+# The traffic endpoints (views, clones, referrers) require push/admin access
+# that the default Actions token does not have: create a fine-grained PAT
+# scoped to this repo with "Administration: read-only" permission and add it
+# as a repository secret named TRAFFIC_TOKEN. Until then, those fields are
+# recorded as empty objects and the snapshot still runs.
+
+name: traffic-snapshot
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC, well inside the 14-day window
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect metrics
+        env:
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN != '' && secrets.TRAFFIC_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p metrics
+          DATE=$(date -u +%F)
+          gh api "repos/$REPO" \
+            --jq "{date: \"$DATE\", stars: .stargazers_count, forks: .forks_count, watchers: .subscribers_count}" \
+            > /tmp/repo.json
+          gh api "repos/$REPO/traffic/views" > /tmp/views.json || echo '{}' > /tmp/views.json
+          gh api "repos/$REPO/traffic/clones" > /tmp/clones.json || echo '{}' > /tmp/clones.json
+          gh api "repos/$REPO/traffic/popular/referrers" > /tmp/referrers.json || echo '[]' > /tmp/referrers.json
+          jq -c -n \
+            --slurpfile r /tmp/repo.json \
+            --slurpfile v /tmp/views.json \
+            --slurpfile c /tmp/clones.json \
+            --slurpfile ref /tmp/referrers.json \
+            '$r[0] + {views: $v[0], clones: $c[0], referrers: $ref[0]}' \
+            >> metrics/history.jsonl
+
+      - name: Commit snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add metrics/history.jsonl
+          git diff --cached --quiet || git commit -m "metrics: weekly traffic snapshot"
+          git push
